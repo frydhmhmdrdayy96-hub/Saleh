@@ -233,7 +233,7 @@ def get_updates(offset=None):
     with urllib.request.urlopen(req, timeout=TIMEOUT+10) as r:
         return json.loads(r.read().decode())
         def send_analysis(timeframe):
-        global is_sending_auto
+            global is_sending_auto
     
     is_sending_auto = True
     try:
