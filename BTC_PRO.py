@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# BTC PRO ULTIMATE V18 - Multi-Timeframe Buttons & 15m Auto
+# BTC PRO ULTIMATE V19 - Fixed Telegram Markdown & Error Handling
 import os
 import sys
 import json
@@ -15,16 +15,15 @@ TIMEOUT = 20
 
 SYMBOL = "BTCUSDT"
 SYMBOL_NAME = "بیت کوین (BTC)"
-DEFAULT_TIMEFRAME = "15m"  # تایم‌فریم پیش‌فرض برای ارسال خودکار
+DEFAULT_TIMEFRAME = "15m"
 
-# متغیر کنترلی برای جلوگیری از ارسال همزمان
 is_sending_auto = False
 
 def api(path, params=None):
     url = BASE + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "BTC-PRO-V18"})
+    req = urllib.request.Request(url, headers={"User-Agent": "BTC-PRO-V19"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read().decode())
 
@@ -202,6 +201,8 @@ def dmi(data, p=14):
 def send_telegram(message, reply_markup=None):
     if not TOKEN or not CHAT: return
     url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
+    
+    # تلاش اول با فرمت مارک‌داون
     payload = {"chat_id": CHAT, "text": message, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
@@ -211,7 +212,17 @@ def send_telegram(message, reply_markup=None):
     try:
         urllib.request.urlopen(req, timeout=TIMEOUT)
     except Exception as e:
-        print("Telegram error:", e)
+        print("Telegram Markdown error:", e)
+        # اگر مارک‌داون خطا داد، به صورت متن ساده می‌فرستیم
+        payload = {"chat_id": CHAT, "text": message} # حذف parse_mode
+        if reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        data = urllib.parse.urlencode(payload).encode()
+        req = urllib.request.Request(url, data=data)
+        try:
+            urllib.request.urlopen(req, timeout=TIMEOUT)
+        except Exception as e2:
+            print("Telegram Plain error:", e2)
 
 def get_updates(offset=None):
     url = "https://api.telegram.org/bot" + TOKEN + "/getUpdates"
@@ -221,8 +232,7 @@ def get_updates(offset=None):
     req = urllib.request.Request(url, data=data)
     with urllib.request.urlopen(req, timeout=TIMEOUT+10) as r:
         return json.loads(r.read().decode())
-
-def send_analysis(timeframe):
+        def send_analysis(timeframe):
     global is_sending_auto
     
     is_sending_auto = True
@@ -245,6 +255,8 @@ def send_analysis(timeframe):
         
         send_telegram(msg)
     except Exception as e:
+        error_msg = f"❌ خطا در تحلیل {timeframe}:\n{str(e)}"
+        send_telegram(error_msg)
         print("Analysis Error:", e)
     finally:
         is_sending_auto = False
@@ -265,7 +277,6 @@ def handle_messages():
     t = threading.Thread(target=auto_timer, daemon=True)
     t.start()
     
-    # ساخت کیبورد با دکمه‌های مختلف تایم‌فریم
     keyboard = {
         "keyboard": [
             [{"text": "5m"}, {"text": "15m"}, {"text": "1h"}],
