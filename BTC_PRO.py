@@ -122,10 +122,10 @@ def dmi(data, p=14):
         adx = (adx * (p - 1) + x) / p
     return last_pdi, last_mdi, adx
     def analyze(data):
-    c = data["close"]
-    h = data["high"]
-    l = data["low"]
-    v = data["volume"]
+        c = data["close"]
+        h = data["high"]
+        l = data["low"]
+        v = data["volume"]
     e20 = ema(c, 20)
     e50 = ema(c, 50)
     e200 = ema(c, 200)
