@@ -120,7 +120,8 @@ def dmi(data, p=14):
     adx = sum(dx[:p]) / p
     for x in dx[p:]:
         adx = (adx * (p - 1) + x) / p
-    return last_pdi, last_mdi, adxdef analyze(data):
+    return last_pdi, last_mdi, adx
+    def analyze(data):
     c = data["close"]
     h = data["high"]
     l = data["low"]
