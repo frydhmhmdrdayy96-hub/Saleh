@@ -305,7 +305,7 @@ def handle_messages():
             print("Polling error:", e)
             time.sleep(5)
 
-if name == "main":
+if __name__ == "__main__":
     if not TOKEN:
         print("BOT_TOKEN is missing!")
         sys.exit(1)
