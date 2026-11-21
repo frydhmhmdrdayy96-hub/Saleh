@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-# BTC PRO ULTIMATE V19 - Fixed Telegram Markdown & Error Handling
+# -*- coding: utf-8 -*-
+"""
+BTC SPOT HUNTER - Cartel Hunter Bot
+منطق: شکار ریز موج‌های کارتل در تایم‌فریم 4 ساعته
+فقط اسپات (Spot) - بدون اهرم، بدون فیوچرز
+"""
+
 import os
 import sys
 import json
@@ -8,377 +14,326 @@ import threading
 import urllib.request
 import urllib.parse
 
+# ═══════════════════════════════════════════════
+# تنظیمات
+# ═══════════════════════════════════════════════
 BASE = "https://data-api.binance.vision"
-TOKEN = os.getenv("BOT_TOKEN", "")
-CHAT = os.getenv("ALLOWED_CHAT_ID", "") or os.getenv("CHAT_ID", "")
-TIMEOUT = 20
+TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHAT = os.getenv("ALLOWED_CHAT_ID", "").strip()
+TIMEOUT = 25
 
 SYMBOL = "BTCUSDT"
-SYMBOL_NAME = "بیت کوین (BTC)"
-DEFAULT_TIMEFRAME = "15m"
+SYMBOL_NAME = "بیت کوین"
+TIMEFRAME = "4h"
+RSI_PERIOD = 14
 
-is_sending_auto = False
+# فاصله تایمر خودکار: هر ۴ ساعت = ۱۴۴۰۰ ثانیه
+AUTO_INTERVAL = 4 * 60 * 60
+
+# قفل برای جلوگیری از ارسال همزمان
+send_lock = threading.Lock()
 
 
-def api(path, params=None):
+# ═══════════════════════════════════════════════
+# دریافت داده از بایننس
+# ═══════════════════════════════════════════════
+def api_get(path, params=None):
     url = BASE + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "BTC-PRO-V19"})
+    req = urllib.request.Request(url, headers={"User-Agent": "SpotHunter/1.0"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read().decode())
 
 
-def candles(interval, limit=300):
-    rows = api("/api/v3/klines", {"symbol": SYMBOL, "interval": interval, "limit": limit})
-    now = int(time.time() * 1000)
-    rows = [x for x in rows if int(x[6]) < now]
-    if len(rows) < 220:
-        raise RuntimeError("داده کافی نیست: " + interval)
+def fetch_candles(symbol, interval, limit=300):
+    """دریافت کندل‌های بسته‌شده (بدون کندل جاری)."""
+    rows = api_get("/api/v3/klines", {
+        "symbol": symbol,
+        "interval": interval,
+        "limit": limit,
+    })
+    now_ms = int(time.time() * 1000)
+    rows = [x for x in rows if int(x[6]) < now_ms]  # فقط کندل بسته‌شده
+    if len(rows) < RSI_PERIOD + 5:
+        raise RuntimeError("داده کافی نیست برای محاسبه RSI")
     return {
-        "time": [int(x[0]) for x in rows],
-        "open": [float(x[1]) for x in rows],
+        "close": [float(x[4]) for x in rows],
         "high": [float(x[2]) for x in rows],
         "low": [float(x[3]) for x in rows],
-        "close": [float(x[4]) for x in rows],
         "volume": [float(x[5]) for x in rows],
+        "time": [int(x[0]) for x in rows],
     }
 
 
-def ema(v, p):
-    out = [None] * len(v)
-    if len(v) < p:
+# ═══════════════════════════════════════════════
+# محاسبه RSI (Wilder's Smoothing)
+# ═══════════════════════════════════════════════
+def rsi(values, period=14):
+    out = [None] * len(values)
+    if len(values) <= period:
         return out
-    value = sum(v[:p]) / p
-    out[p - 1] = value
-    alpha = 2 / (p + 1)
-    for i in range(p, len(v)):
-        value = v[i] * alpha + value * (1 - alpha)
-        out[i] = value
-    return out
 
+    changes = [values[i] - values[i - 1] for i in range(1, len(values))]
+    gains = [max(x, 0.0) for x in changes]
+    losses = [max(-x, 0.0) for x in changes]
 
-def rsi(v, p=14):
-    out = [None] * len(v)
-    if len(v) <= p:
-        return out
-    changes = [v[i] - v[i - 1] for i in range(1, len(v))]
-    gains = [max(x, 0) for x in changes]
-    losses = [max(-x, 0) for x in changes]
-    ag = sum(gains[:p]) / p
-    al = sum(losses[:p]) / p
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
 
-    def calc(g, l):
+    def _calc(g, l):
         if l == 0:
-            return 100 if g else 50
-        return 100 - 100 / (1 + g / l)
+            return 100.0 if g > 0 else 50.0
+        rs = g / l
+        return 100.0 - (100.0 / (1.0 + rs))
 
-    out[p] = calc(ag, al)
-    for i in range(p + 1, len(v)):
-        ag = (ag * (p - 1) + gains[i - 1]) / p
-        al = (al * (p - 1) + losses[i - 1]) / p
-        out[i] = calc(ag, al)
+    out[period] = _calc(avg_gain, avg_loss)
+
+    for i in range(period + 1, len(values)):
+        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
+        out[i] = _calc(avg_gain, avg_loss)
+
     return out
 
 
-def macd(v):
-    f, s = ema(v, 12), ema(v, 26)
-    line = [None] * len(v)
-    for i in range(len(v)):
-        if f[i] is not None and s[i] is not None:
-            line[i] = f[i] - s[i]
-    start = next((i for i, x in enumerate(line) if x is not None), len(line))
-    valid = line[start:]
-    sig = ema(valid, 9) if valid else []
-    signal = [None] * len(v)
-    hist = [None] * len(v)
-    for j, x in enumerate(sig):
-        i = start + j
-        if x is not None and line[i] is not None:
-            signal[i] = x
-            hist[i] = line[i] - x
-    return line, signal, hist
+# ═══════════════════════════════════════════════
+# منطق شکارچی کارتل
+# ═══════════════════════════════════════════════
+def analyze_market():
+    data = fetch_candles(SYMBOL, TIMEFRAME, limit=300)
+    closes = data["close"]
+    rsi_values = rsi(closes, RSI_PERIOD)
+    current_rsi = rsi_values[-1]
+    price = closes[-1]
 
+    if current_rsi is None:
+        raise RuntimeError("RSI محاسبه نشد")
 
-def dmi(data, p=14):
-    h, l, c = data["high"], data["low"], data["close"]
-    n = len(c)
-    tr = [0.0] * n
-    plus = [0.0] * n
-    minus = [0.0] * n
-    for i in range(1, n):
-        up = h[i] - h[i - 1]
-        down = l[i - 1] - l[i]
-        plus[i] = up if up > down and up > 0 else 0
-        minus[i] = down if down > up and down > 0 else 0
-        tr[i] = max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1]))
-    st = sum(tr[1:p + 1])
-    sp = sum(plus[1:p + 1])
-    sm = sum(minus[1:p + 1])
-    dx = []
-    last_pdi = last_mdi = 0
-    for i in range(p + 1, n):
-        st = st - st / p + tr[i]
-        sp = sp - sp / p + plus[i]
-        sm = sm - sm / p + minus[i]
-        if st == 0:
-            continue
-        last_pdi = 100 * sp / st
-        last_mdi = 100 * sm / st
-        total = last_pdi + last_mdi
-        dx.append(100 * abs(last_pdi - last_mdi) / total if total else 0)
-    if len(dx) < p:
-        return 0, 0, 0
-    adx = sum(dx[:p]) / p
-    for x in dx[p:]:
-        adx = (adx * (p - 1) + x) / p
-    return last_pdi, last_mdi, adx
-
-
-def analyze(data):
-    c = data["close"]
-    h = data["high"]
-    l = data["low"]
-    v = data["volume"]
-    e20 = ema(c, 20)
-    e50 = ema(c, 50)
-    e200 = ema(c, 200)
-    rr = rsi(c)
-    _, _, mh = macd(c)
-    pdi, mdi, adx_value = dmi(data)
-    i = -1
-    price = c[-1]
-
-    bull = 0
-    bear = 0
-    if price > e20[i]:
-        bull += 2
+    # ─── تشخیص سیگنال ───
+    if current_rsi < 30:
+        signal = "🟢 خرید اسپات (Spot Buy)"
+        reason = (
+            "RSI زیر ۳۰ است. همه از ترس دارند می‌فروشند. "
+            "کارتل دارد می‌ترساند و کف بازار شکل گرفته. "
+            "فرصت خرید در بازار اسپات."
+        )
+        action = "خرید"
+    elif current_rsi > 70:
+        signal = "🔴 فروش اسپات (Spot Sell)"
+        reason = (
+            "RSI بالای ۷۰ است. همه با طمع دارند می‌خرند. "
+            "کارتل دارد پوزیشن‌هایش را خالی می‌کند. "
+            "زمان فروش و نقد کردن سود."
+        )
+        action = "فروش"
     else:
-        bear += 2
-    if e20[i] > e50[i]:
-        bull += 2
-    else:
-        bear += 2
-    if e50[i] > e200[i]:
-        bull += 2
-    else:
-        bear += 2
-    if rr[i] > 55:
-        bull += 2
-    elif rr[i] < 45:
-        bear += 2
-    if mh[i] > 0 and mh[i] > mh[-2]:
-        bull += 2
-    elif mh[i] < 0 and mh[i] < mh[-2]:
-        bear += 2
-    if adx_value >= 18:
-        if pdi > mdi:
-            bull += 2
-        elif mdi > pdi:
-            bear += 2
-
-    resistance = max(h[-21:-1])
-    support = min(l[-21:-1])
-    if price > resistance:
-        bull += 3
-    if price < support:
-        bear += 3
-
-    typical = [(h[j] + l[j] + c[j]) / 3 for j in range(len(c) - 30, len(c))]
-    volumes = v[-30:]
-    total_volume = sum(volumes)
-    vwap = sum(x * y for x, y in zip(typical, volumes)) / total_volume if total_volume else price
-    if price > vwap:
-        bull += 1
-    elif price < vwap:
-        bear += 1
-
-    total_score = bull + bear
-    normalized = (bull / total_score * 100) if total_score > 0 else 50
-
-    if adx_value < 20:
-        trend_text = "رِنج (بدون روند)"
-    elif adx_value < 25:
-        trend_text = "در حال شکل‌گیری"
-    elif adx_value < 40:
-        trend_text = "روند قوی"
-    else:
-        trend_text = "روند بسیار قوی"
-
-    if rr[i] < 30:
-        rsi_text = "اشباع فروش"
-    elif rr[i] > 70:
-        rsi_text = "اشباع خرید"
-    else:
-        rsi_text = "خنثی"
-
-    if mh[i] > 0 and mh[i] > mh[-2]:
-        macd_text = "صعودی (خریداران)"
-    elif mh[i] < 0 and mh[i] < mh[-2]:
-        macd_text = "نزولی (فروشندگان)"
-    else:
-        macd_text = "کم‌جان"
-
-    if normalized >= 65:
-        status = "🟢 صعودی"
-    elif normalized <= 35:
-        status = "🔴 نزولی"
-    else:
-        status = "🟡 خنثی"
-
-    if normalized >= 65 and adx_value >= 20 and rr[i] < 70:
-        action = "🟢 خرید بزن"
-        action_desc = "شرایط صعودی تایید شد."
-    elif normalized <= 35 and adx_value >= 20 and rr[i] > 30:
-        action = "🔴 فروش بزن"
-        action_desc = "شرایط نزولی تایید شد."
-    else:
-        action = "🟡 معامله نکن"
-        action_desc = "شرایط برای ورود امن نیست، صبر کنید."
+        signal = "🟡 صبر کن (معامله نکن)"
+        reason = (
+            "RSI بین ۳۰ تا ۷۰ است. بازار در حالت خنثی و بدون تصمیم. "
+            "کارتل هنوز حرکت اصلی‌اش را شروع نکرده. "
+            "صبر کن تا بازار به یکی از دو ناحیه برسد."
+        )
+        action = "صبر"
 
     return {
         "price": price,
-        "trend_text": trend_text,
-        "rsi_text": rsi_text,
-        "macd_text": macd_text,
-        "status": status,
-        "support": support,
-        "resistance": resistance,
+        "rsi": current_rsi,
+        "signal": signal,
+        "reason": reason,
         "action": action,
-        "action_desc": action_desc,
     }
 
 
-def send_telegram(message, reply_markup=None):
-    if not TOKEN or not CHAT:
+# ═══════════════════════════════════════════════
+# ارسال پیام تلگرام (Plain Text)
+# ═══════════════════════════════════════════════
+def send_message(text, chat_id=None, keyboard=None):
+    if not TOKEN:
+        print("BOT_TOKEN تنظیم نشده")
         return
-    url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
+    target = chat_id or CHAT
+    if not target:
+        print("CHAT_ID تنظیم نشده")
+        return
 
-    payload = {"chat_id": CHAT, "text": message, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
+    url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
+    payload = {"chat_id": target, "text": text}
+    if keyboard:
+        payload["reply_markup"] = json.dumps(keyboard)
 
     data = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(url, data=data)
-    try:
-        urllib.request.urlopen(req, timeout=TIMEOUT)
-    except Exception as e:
-        print("Telegram Markdown error:", e)
-        payload = {"chat_id": CHAT, "text": message}
-        if reply_markup:
-            payload["reply_markup"] = json.dumps(reply_markup)
-        data = urllib.parse.urlencode(payload).encode()
-        req = urllib.request.Request(url, data=data)
+
+    with send_lock:
         try:
             urllib.request.urlopen(req, timeout=TIMEOUT)
-        except Exception as e2:
-            print("Telegram Plain error:", e2)
+        except Exception as e:
+            print("Telegram send error:", e)
 
 
 def get_updates(offset=None):
     url = "https://api.telegram.org/bot" + TOKEN + "/getUpdates"
-    params = {"timeout": 30, "drop_pending_updates": True}
+    params = {
+        "timeout": 30,
+        "drop_pending_updates": True,  # جلوگیری از پیام‌های تکراری بعد از ری‌استارت
+    }
     if offset:
         params["offset"] = offset
+
     data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(url, data=data)
     with urllib.request.urlopen(req, timeout=TIMEOUT + 10) as r:
         return json.loads(r.read().decode())
 
 
-def send_analysis(timeframe):
-    global is_sending_auto
-    is_sending_auto = True
-    try:
-        d_tf = candles(timeframe)
-        res = analyze(d_tf)
-
-        msg = f"📊 تحلیل {SYMBOL_NAME} ({timeframe})\n"
-        msg += "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        msg += f"💰 قیمت: ${res['price']:,.2f}\n"
-        msg += f"📌 وضعیت: {res['status']}\n\n"
-        msg += f"🔹 روند بازار: {res['trend_text']}\n"
-        msg += f"🔹 روانشناسی: {res['rsi_text']}\n"
-        msg += f"🔹 مومنتوم: {res['macd_text']}\n\n"
-        msg += f"🟢 حمایت: ${res['support']:,.2f}\n"
-        msg += f"🔴 مقاومت: ${res['resistance']:,.2f}\n"
-        msg += "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        msg += f"🎯 توصیه نهایی: {res['action']}\n"
-        msg += f"_{res['action_desc']}_"
-
-        send_telegram(msg)
-    except Exception as e:
-        error_msg = f"❌ خطا در تحلیل {timeframe}:\n{str(e)}"
-        send_telegram(error_msg)
-        print("Analysis Error:", e)
-    finally:
-        is_sending_auto = False
+# ═══════════════════════════════════════════════
+# ساخت پیام تحلیل
+# ═══════════════════════════════════════════════
+def build_message(result, auto=False):
+    head = "🔔 هشدار خودکار کارتل" if auto else "🕵️‍♂️ گزارش شکارچی کارتل"
+    lines = [
+        head,
+        "━━━━━━━━━━━━━━━━━━",
+        f"جفت‌ارز: {SYMBOL_NAME} ({SYMBOL})",
+        f"تایم‌فریم: {TIMEFRAME}",
+        "",
+        f"قیمت فعلی: ${result['price']:,.2f}",
+        f"RSI ({RSI_PERIOD}): {result['rsi']:.2f}",
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        f"سیگنال: {result['signal']}",
+        "",
+        f"تحلیل:",
+        result["reason"],
+        "━━━━━━━━━━━━━━━━━━",
+        "⚠️ فقط بازار اسپات — بدون اهرم و فیوچرز",
+    ]
+    if auto:
+        lines.append("⏰ این تحلیل هر ۴ ساعت خودکار ارسال می‌شود")
+    return "\n".join(lines)
 
 
-def auto_timer():
-    print("Auto-timer started (every 15 mins).")
-    while True:
-        time.sleep(900)  # 15 دقیقه
-        if not is_sending_auto:
-            print("Sending auto analysis...")
-            send_analysis(DEFAULT_TIMEFRAME)
-
-
-def handle_messages():
-    print("Bot is running...")
-    last_update_id = None
-
-    t = threading.Thread(target=auto_timer, daemon=True)
-    t.start()
-
-    keyboard = {
-        "keyboard": [
-            [{"text": "5m"}, {"text": "15m"}, {"text": "1h"}],
-            [{"text": "4h"}, {"text": "1d"}],
-        ],
+# ═══════════════════════════════════════════════
+# کیبورد
+# ═══════════════════════════════════════════════
+def main_keyboard():
+    return {
+        "keyboard": [[{"text": "🕵️‍♂️ بررسی بازار"}]],
         "resize_keyboard": True,
         "one_time_keyboard": False,
     }
 
+
+# ═══════════════════════════════════════════════
+# اجرای تحلیل و ارسال
+# ═══════════════════════════════════════════════
+def run_analysis(chat_id, auto=False):
+    try:
+        if not auto:
+            send_message("⏳ در حال بررسی بازار...", chat_id=chat_id)
+        result = analyze_market()
+        msg = build_message(result, auto=auto)
+        send_message(msg, chat_id=chat_id, keyboard=main_keyboard())
+        print(f"[{'AUTO' if auto else 'MANUAL'}] Signal: {result['action']} | RSI={result['rsi']:.2f}")
+    except Exception as e:
+        err = f"❌ خطا در تحلیل بازار:\n{str(e)}"
+        send_message(err, chat_id=chat_id, keyboard=main_keyboard())
+        print("Analysis error:", e)
+
+
+# ═══════════════════════════════════════════════
+# تایمر خودکار (هر ۴ ساعت)
+# ═══════════════════════════════════════════════
+def auto_hunter():
+    print(f"⏰ Auto Hunter started (every {AUTO_INTERVAL // 3600} hours)")
+    while True:
+        time.sleep(AUTO_INTERVAL)
+        if not CHAT:
+            continue
+        print("⏰ Running auto analysis...")
+        run_analysis(CHAT, auto=True)
+
+
+# ═══════════════════════════════════════════════
+# حلقه اصلی ربات
+# ═══════════════════════════════════════════════
+def main():
+    if not TOKEN:
+        print("❌ BOT_TOKEN در متغیرهای محیطی تنظیم نشده!")
+        sys.exit(1)
+
+    print("🚀 Spot Hunter Bot is running...")
+
+    # شروع تایمر خودکار
+    threading.Thread(target=auto_hunter, daemon=True).start()
+
+    last_update_id = None
+
     while True:
         try:
             updates = get_updates(last_update_id)
-            if updates.get("ok"):
-                for update in updates["result"]:
-                    last_update_id = update["update_id"] + 1
-                    if "message" in update and "text" in update["message"]:
-                        text = update["message"]["text"].strip()
-                        chat_id = str(update["message"]["chat"]["id"])
+            if not updates.get("ok"):
+                time.sleep(3)
+                continue
 
-                        if CHAT and chat_id != CHAT:
-                            continue
+            for update in updates["result"]:
+                last_update_id = update["update_id"] + 1
 
-                        if text in ["/start", "استارت", "شروع"]:
-                            send_telegram(
-                                f"🤖 ربات تحلیل {SYMBOL_NAME}\n\n"
-                                "✅ روشن شد.\n"
-                                "از این به بعد هر ۱۵ دقیقه تحلیل تایم‌فریم ۱۵ دقیقه را می‌فرستم.\n"
-                                "برای تحلیل دستی، روی دکمه‌های زیر کلیک کنید:",
-                                reply_markup=keyboard,
-                            )
+                if "message" not in update or "text" not in update["message"]:
+                    continue
 
-                        elif text in ["5m", "15m", "1h", "4h", "1d"]:
-                            if not is_sending_auto:
-                                send_telegram(f"⏳ در حال تحلیل تایم‌فریم {text}...")
-                                send_analysis(text)
+                text = update["message"]["text"].strip()
+                chat_id = str(update["message"]["chat"]["id"])
 
-                        elif text in ["/analyze", "تحلیل", "تحلیل کن"]:
-                            if not is_sending_auto:
-                                send_telegram(f"⏳ در حال تحلیل تایم‌فریم {DEFAULT_TIMEFRAME}...")
-                                send_analysis(DEFAULT_TIMEFRAME)
-            time.sleep(1)
+                # فقط چت مجاز
+                if CHAT and chat_id != CHAT:
+                    continue
+
+                # ─── /start ───
+                if text in ["/start", "شروع", "استارت"]:
+                    welcome = (
+                        "🕵️‍♂️ به ربات شکارچی کارتل خوش آمدید\n\n"
+                        "این ربات فقط در تایم‌فریم ۴ ساعته کار می‌کند،\n"
+                        "چون تایم‌فریم‌های پایین زمین بازی دستکاری‌شده‌ی کارتل هستند.\n\n"
+                        "منطق کار:\n"
+                        "• RSI زیر ۳۰ ← 🟢 خرید اسپات\n"
+                        "• RSI بالای ۷۰ ← 🔴 فروش اسپات\n"
+                        "• بین ۳۰ تا ۷۰ ← 🟡 صبر کن\n\n"
+                        "برای شروع، دکمه زیر را بزن:\n"
+                        "⏰ هر ۴ ساعت هم خودکار تحلیل می‌فرستم."
+                    )
+                    send_message(welcome, chat_id=chat_id, keyboard=main_keyboard())
+
+                # ─── دکمه بررسی بازار ───
+                elif text in ["🕵️‍♂️ بررسی بازار", "بررسی بازار", "بررسی", "/analyze"]:
+                    threading.Thread(
+                        target=run_analysis,
+                        args=(chat_id,),
+                        daemon=True,
+                    ).start()
+
+                # ─── /stop ───
+                elif text in ["/stop", "توقف", "قطع"]:
+                    send_message(
+                        "🛑 برای قطع کامل ربات، در GitHub Actions آن را غیرفعال کن.\n"
+                        "تایمر خودکار همچنان کار می‌کند.",
+                        chat_id=chat_id,
+                    )
+
+                # ─── هر پیام دیگری ───
+                else:
+                    send_message(
+                        "برای بررسی بازار، دکمه زیر را بزن 👇",
+                        chat_id=chat_id,
+                        keyboard=main_keyboard(),
+                    )
+
         except Exception as e:
             print("Polling error:", e)
             time.sleep(5)
 
 
+# ═══════════════════════════════════════════════
 if __name__ == "__main__":
-    if not TOKEN:
-        print("BOT_TOKEN is missing!")
-        sys.exit(1)
-    handle_messages()
+    main()
