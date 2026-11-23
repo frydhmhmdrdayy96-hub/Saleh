@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BTC SPOT HUNTER - Cartel Hunter Bot
-منطق: شکار ریز موج‌های کارتل در تایم‌فریم ۱ ساعته
-فقط اسپات (Spot) - بدون اهرم، بدون فیوچرز
+BTC SPOT HUNTER - Multi Timeframe Cartel Hunter
+تایم‌فریم‌ها: 30m ، 1h ، 4h
+فقط اسپات (Spot) - بدون اهرم
 """
 
 import os
@@ -24,11 +24,17 @@ TIMEOUT = 25
 
 SYMBOL = "BTCUSDT"
 SYMBOL_NAME = "بیت کوین"
-TIMEFRAME = "1h"          # ← تایم‌فریم ۱ ساعته
 RSI_PERIOD = 14
 
-# تایمر خودکار: هر ۱ ساعت
-AUTO_INTERVAL = 1 * 60 * 60   # ۳۶۰۰ ثانیه
+# تایم‌فریم‌ها و برچسب فارسی‌شان
+TIMEFRAMES = {
+    "30m": "۳۰ دقیقه",
+    "1h":  "۱ ساعته",
+    "4h":  "۴ ساعته",
+}
+
+# فاصله تایمر خودکار: هر ۳۰ دقیقه (برای هر سه تایم‌فریم)
+AUTO_INTERVAL = 30 * 60   # ۱۸۰۰ ثانیه
 
 send_lock = threading.Lock()
 
@@ -40,7 +46,7 @@ def api_get(path, params=None):
     url = BASE + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "SpotHunter/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "SpotHunter/2.0"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read().decode())
 
@@ -54,7 +60,7 @@ def fetch_candles(symbol, interval, limit=300):
     now_ms = int(time.time() * 1000)
     rows = [x for x in rows if int(x[6]) < now_ms]  # فقط کندل بسته‌شده
     if len(rows) < RSI_PERIOD + 5:
-        raise RuntimeError("داده کافی نیست برای محاسبه RSI")
+        raise RuntimeError(f"داده کافی نیست برای {interval}")
     return {
         "close": [float(x[4]) for x in rows],
         "high": [float(x[2]) for x in rows],
@@ -92,50 +98,63 @@ def rsi(values, period=14):
 
 
 # ═══════════════════════════════════════════════
-# منطق شکارچی کارتل
+# منطق شکارچی کارتل (برای یک تایم‌فریم)
 # ═══════════════════════════════════════════════
-def analyze_market():
-    data = fetch_candles(SYMBOL, TIMEFRAME, limit=300)
+def analyze_tf(timeframe):
+    data = fetch_candles(SYMBOL, timeframe, limit=300)
     closes = data["close"]
     rsi_values = rsi(closes, RSI_PERIOD)
     current_rsi = rsi_values[-1]
     price = closes[-1]
 
     if current_rsi is None:
-        raise RuntimeError("RSI محاسبه نشد")
+        raise RuntimeError(f"RSI محاسبه نشد برای {timeframe}")
 
     if current_rsi < 30:
         signal = "🟢 خرید اسپات (Spot Buy)"
         reason = (
             "RSI زیر ۳۰ است. همه از ترس دارند می‌فروشند. "
-            "کارتل دارد می‌ترساند و کف بازار شکل گرفته. "
-            "فرصت خرید در بازار اسپات."
+            "کارتل دارد می‌ترساند و کف بازار شکل گرفته."
         )
         action = "خرید"
     elif current_rsi > 70:
         signal = "🔴 فروش اسپات (Spot Sell)"
         reason = (
             "RSI بالای ۷۰ است. همه با طمع دارند می‌خرند. "
-            "کارتل دارد پوزیشن‌هایش را خالی می‌کند. "
-            "زمان فروش و نقد کردن سود."
+            "کارتل دارد پوزیشن‌هایش را خالی می‌کند."
         )
         action = "فروش"
     else:
         signal = "🟡 صبر کن (معامله نکن)"
         reason = (
-            "RSI بین ۳۰ تا ۷۰ است. بازار در حالت خنثی. "
-            "کارتل هنوز حرکت اصلی‌اش را شروع نکرده. "
-            "صبر کن تا بازار به یکی از دو ناحیه برسد."
+            "RSI بین ۳۰ تا ۷۰ است. بازار خنثی. "
+            "کارتل هنوز حرکت اصلی‌اش را شروع نکرده."
         )
         action = "صبر"
 
     return {
+        "timeframe": timeframe,
+        "tf_fa": TIMEFRAMES.get(timeframe, timeframe),
         "price": price,
         "rsi": current_rsi,
         "signal": signal,
         "reason": reason,
         "action": action,
     }
+
+
+# ═══════════════════════════════════════════════
+# تحلیل هر سه تایم‌فریم
+# ═══════════════════════════════════════════════
+def analyze_all():
+    results = {}
+    errors = {}
+    for tf in TIMEFRAMES.keys():
+        try:
+            results[tf] = analyze_tf(tf)
+        except Exception as e:
+            errors[tf] = str(e)
+    return results, errors
 
 
 # ═══════════════════════════════════════════════
@@ -176,33 +195,92 @@ def get_updates(offset=None):
 # ═══════════════════════════════════════════════
 # ساخت پیام
 # ═══════════════════════════════════════════════
-def build_message(result, auto=False):
+def build_single_message(r, auto=False):
     head = "🔔 هشدار خودکار کارتل" if auto else "🕵️‍♂️ گزارش شکارچی کارتل"
     lines = [
         head,
         "━━━━━━━━━━━━━━━━━━",
         f"جفت‌ارز: {SYMBOL_NAME} ({SYMBOL})",
-        f"تایم‌فریم: {TIMEFRAME}",
+        f"تایم‌فریم: {r['tf_fa']} ({r['timeframe']})",
         "",
-        f"قیمت فعلی: ${result['price']:,.2f}",
-        f"RSI ({RSI_PERIOD}): {result['rsi']:.2f}",
+        f"قیمت فعلی: ${r['price']:,.2f}",
+        f"RSI ({RSI_PERIOD}): {r['rsi']:.2f}",
         "",
         "━━━━━━━━━━━━━━━━━━",
-        f"سیگنال: {result['signal']}",
+        f"سیگنال: {r['signal']}",
         "",
         "تحلیل:",
-        result["reason"],
+        r["reason"],
         "━━━━━━━━━━━━━━━━━━",
-        "⚠️ فقط بازار اسپات — بدون اهرم و فیوچرز",
+        "⚠️ فقط بازار اسپات — بدون اهرم",
     ]
     if auto:
-        lines.append("⏰ این تحلیل هر ۱ ساعت خودکار ارسال می‌شود")
+        lines.append("⏰ این تحلیل هر ۳۰ دقیقه خودکار ارسال می‌شود")
     return "\n".join(lines)
 
 
+def build_all_message(results, errors, auto=False):
+    head = "🔔 تحلیل خودکار همه تایم‌فریم‌ها" if auto else "🕵️‍♂️ تحلیل همه تایم‌فریم‌ها"
+    lines = [
+        head,
+        "━━━━━━━━━━━━━━━━━━",
+        f"جفت‌ارز: {SYMBOL_NAME} ({SYMBOL})",
+        "",
+    ]
+
+    buy_count = sell_count = wait_count = 0
+
+    for tf, tf_fa in TIMEFRAMES.items():
+        if tf in errors:
+            lines.append(f"⚠️ {tf_fa}: خطا ({errors[tf]})")
+            lines.append("")
+            continue
+
+        r = results[tf]
+        if r["action"] == "خرید":
+            buy_count += 1
+        elif r["action"] == "فروش":
+            sell_count += 1
+        else:
+            wait_count += 1
+
+        lines.append(f"📊 {tf_fa} ({tf})")
+        lines.append(f"   قیمت: ${r['price']:,.2f}")
+        lines.append(f"   RSI: {r['rsi']:.2f}")
+        lines.append(f"   سیگنال: {r['signal']}")
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("جمع‌بندی:")
+    lines.append(f"🟢 خرید: {buy_count} | 🔴 فروش: {sell_count} | 🟡 صبر: {wait_count}")
+
+    if buy_count >= 2:
+        lines.append("✅ حداقل دو تایم‌فریم سیگنال خرید می‌دهند — فرصت قوی")
+    elif sell_count >= 2:
+        lines.append("✅ حداقل دو تایم‌فریم سیگنال فروش می‌دهند — فرصت قوی")
+    elif buy_count == 1:
+        lines.append("⚠️ فقط یک تایم‌فریم خرید می‌دهد — با احتیاط وارد شو")
+    elif sell_count == 1:
+        lines.append("⚠️ فقط یک تایم‌فریم فروش می‌دهد — با احتیاط خارج شو")
+    else:
+        lines.append("⚪ هیچ سیگنال همسویی بین تایم‌فریم‌ها نیست — صبر کن")
+
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append("⚠️ فقط بازار اسپات — بدون اهرم")
+    if auto:
+        lines.append("⏰ این تحلیل هر ۳۰ دقیقه خودکار ارسال می‌شود")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════
+# کیبورد
+# ═══════════════════════════════════════════════
 def main_keyboard():
     return {
-        "keyboard": [[{"text": "🕵️‍♂️ بررسی بازار"}]],
+        "keyboard": [
+            [{"text": "🕵️‍♂️ تحلیل همه تایم‌فریم‌ها"}],
+            [{"text": "📊 ۳۰ دقیقه"}, {"text": "📊 ۱ ساعته"}, {"text": "📊 ۴ ساعته"}],
+        ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
     }
@@ -211,22 +289,41 @@ def main_keyboard():
 # ═══════════════════════════════════════════════
 # اجرای تحلیل
 # ═══════════════════════════════════════════════
-def run_analysis(chat_id, auto=False):
+def run_single(chat_id, tf, auto=False):
     try:
         if not auto:
-            send_message("⏳ در حال بررسی بازار...", chat_id=chat_id)
-        result = analyze_market()
-        msg = build_message(result, auto=auto)
+            send_message(f"⏳ در حال تحلیل {TIMEFRAMES[tf]}...", chat_id=chat_id)
+        r = analyze_tf(tf)
+        msg = build_single_message(r, auto=auto)
         send_message(msg, chat_id=chat_id, keyboard=main_keyboard())
-        print(f"[{'AUTO' if auto else 'MANUAL'}] {result['action']} | RSI={result['rsi']:.2f}")
+        print(f"[{'AUTO' if auto else 'MANUAL'}] {tf} → {r['action']} | RSI={r['rsi']:.2f}")
     except Exception as e:
-        err = f"❌ خطا در تحلیل بازار:\n{str(e)}"
-        send_message(err, chat_id=chat_id, keyboard=main_keyboard())
-        print("Analysis error:", e)
+        send_message(f"❌ خطا در تحلیل {TIMEFRAMES[tf]}:\n{str(e)}",
+                     chat_id=chat_id, keyboard=main_keyboard())
+        print(f"Analysis error ({tf}):", e)
+
+
+def run_all(chat_id, auto=False):
+    try:
+        if not auto:
+            send_message("⏳ در حال تحلیل همه تایم‌فریم‌ها...", chat_id=chat_id)
+        results, errors = analyze_all()
+        if not results and errors:
+            send_message("❌ هیچ تایم‌فریمی تحلیل نشد:\n" + json.dumps(errors, ensure_ascii=False),
+                         chat_id=chat_id, keyboard=main_keyboard())
+            return
+        msg = build_all_message(results, errors, auto=auto)
+        send_message(msg, chat_id=chat_id, keyboard=main_keyboard())
+        summary = ", ".join(f"{tf}={results[tf]['action']}" for tf in results)
+        print(f"[{'AUTO' if auto else 'MANUAL'}] ALL → {summary}")
+    except Exception as e:
+        send_message(f"❌ خطا در تحلیل همه:\n{str(e)}",
+                     chat_id=chat_id, keyboard=main_keyboard())
+        print("Analysis ALL error:", e)
 
 
 # ═══════════════════════════════════════════════
-# تایمر خودکار — هر ۱ ساعت
+# تایمر خودکار — هر ۳۰ دقیقه
 # ═══════════════════════════════════════════════
 def auto_hunter():
     print(f"⏰ Auto Hunter started (every {AUTO_INTERVAL // 60} minutes)")
@@ -234,8 +331,8 @@ def auto_hunter():
         time.sleep(AUTO_INTERVAL)
         if not CHAT:
             continue
-        print("⏰ Running auto analysis...")
-        run_analysis(CHAT, auto=True)
+        print("⏰ Running auto analysis (all timeframes)...")
+        run_all(CHAT, auto=True)
 
 
 # ═══════════════════════════════════════════════
@@ -246,7 +343,7 @@ def main():
         print("❌ BOT_TOKEN در متغیرهای محیطی تنظیم نشده!")
         sys.exit(1)
 
-    print("🚀 Spot Hunter Bot is running (1h timeframe)...")
+    print("🚀 Spot Hunter Bot is running (30m / 1h / 4h)...")
     threading.Thread(target=auto_hunter, daemon=True).start()
 
     last_update_id = None
@@ -271,23 +368,30 @@ def main():
                 if text in ["/start", "شروع", "استارت"]:
                     welcome = (
                         "🕵️‍♂️ به ربات شکارچی کارتل خوش آمدید\n\n"
-                        "این ربات فقط در تایم‌فریم ۱ ساعته کار می‌کند،\n"
-                        "چون تایم‌فریم‌های پایین زمین بازی دستکاری‌شده‌ی کارتل هستند.\n\n"
+                        "این ربات در سه تایم‌فریم تحلیل می‌کند:\n"
+                        "• ۳۰ دقیقه (نیم‌ساعته)\n"
+                        "• ۱ ساعته\n"
+                        "• ۴ ساعته\n\n"
                         "منطق کار:\n"
                         "• RSI زیر ۳۰ ← 🟢 خرید اسپات\n"
                         "• RSI بالای ۷۰ ← 🔴 فروش اسپات\n"
                         "• بین ۳۰ تا ۷۰ ← 🟡 صبر کن\n\n"
-                        "برای شروع، دکمه زیر را بزن:\n"
-                        "⏰ هر ۱ ساعت هم خودکار تحلیل می‌فرستم."
+                        "می‌توانی هر تایم‌فریم را جدا ببینی یا همه را با هم.\n"
+                        "⏰ هر ۳۰ دقیقه هم خودکار همه تایم‌فریم‌ها را تحلیل می‌کنم."
                     )
                     send_message(welcome, chat_id=chat_id, keyboard=main_keyboard())
 
-                elif text in ["🕵️‍♂️ بررسی بازار", "بررسی بازار", "بررسی", "/analyze"]:
-                    threading.Thread(
-                        target=run_analysis,
-                        args=(chat_id,),
-                        daemon=True,
-                    ).start()
+                elif text in ["🕵️‍♂️ تحلیل همه تایم‌فریم‌ها", "همه تایم‌فریم‌ها", "همه"]:
+                    threading.Thread(target=run_all, args=(chat_id,), daemon=True).start()
+
+                elif text == "📊 ۳۰ دقیقه":
+                    threading.Thread(target=run_single, args=(chat_id, "30m"), daemon=True).start()
+
+                elif text == "📊 ۱ ساعته":
+                    threading.Thread(target=run_single, args=(chat_id, "1h"), daemon=True).start()
+
+                elif text == "📊 ۴ ساعته":
+                    threading.Thread(target=run_single, args=(chat_id, "4h"), daemon=True).start()
 
                 elif text in ["/stop", "توقف", "قطع"]:
                     send_message(
@@ -297,7 +401,7 @@ def main():
 
                 else:
                     send_message(
-                        "برای بررسی بازار، دکمه زیر را بزن 👇",
+                        "از دکمه‌های زیر استفاده کن 👇",
                         chat_id=chat_id,
                         keyboard=main_keyboard(),
                     )
