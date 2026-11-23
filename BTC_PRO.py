@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 BTC SPOT HUNTER - Cartel Hunter Bot
-منطق: شکار ریز موج‌های کارتل در تایم‌فریم 4 ساعته
+منطق: شکار ریز موج‌های کارتل در تایم‌فریم ۱ ساعته
 فقط اسپات (Spot) - بدون اهرم، بدون فیوچرز
 """
 
@@ -24,18 +24,17 @@ TIMEOUT = 25
 
 SYMBOL = "BTCUSDT"
 SYMBOL_NAME = "بیت کوین"
-TIMEFRAME = "4h"
+TIMEFRAME = "1h"          # ← تایم‌فریم ۱ ساعته
 RSI_PERIOD = 14
 
-# فاصله تایمر خودکار: هر ۴ ساعت = ۱۴۴۰۰ ثانیه
-AUTO_INTERVAL = 4 * 60 * 60
+# تایمر خودکار: هر ۱ ساعت
+AUTO_INTERVAL = 1 * 60 * 60   # ۳۶۰۰ ثانیه
 
-# قفل برای جلوگیری از ارسال همزمان
 send_lock = threading.Lock()
 
 
 # ═══════════════════════════════════════════════
-# دریافت داده از بایننس
+# دریافت داده
 # ═══════════════════════════════════════════════
 def api_get(path, params=None):
     url = BASE + path
@@ -47,7 +46,6 @@ def api_get(path, params=None):
 
 
 def fetch_candles(symbol, interval, limit=300):
-    """دریافت کندل‌های بسته‌شده (بدون کندل جاری)."""
     rows = api_get("/api/v3/klines", {
         "symbol": symbol,
         "interval": interval,
@@ -67,17 +65,15 @@ def fetch_candles(symbol, interval, limit=300):
 
 
 # ═══════════════════════════════════════════════
-# محاسبه RSI (Wilder's Smoothing)
+# RSI
 # ═══════════════════════════════════════════════
 def rsi(values, period=14):
     out = [None] * len(values)
     if len(values) <= period:
         return out
-
     changes = [values[i] - values[i - 1] for i in range(1, len(values))]
     gains = [max(x, 0.0) for x in changes]
     losses = [max(-x, 0.0) for x in changes]
-
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
 
@@ -88,12 +84,10 @@ def rsi(values, period=14):
         return 100.0 - (100.0 / (1.0 + rs))
 
     out[period] = _calc(avg_gain, avg_loss)
-
     for i in range(period + 1, len(values)):
         avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
         out[i] = _calc(avg_gain, avg_loss)
-
     return out
 
 
@@ -110,7 +104,6 @@ def analyze_market():
     if current_rsi is None:
         raise RuntimeError("RSI محاسبه نشد")
 
-    # ─── تشخیص سیگنال ───
     if current_rsi < 30:
         signal = "🟢 خرید اسپات (Spot Buy)"
         reason = (
@@ -130,7 +123,7 @@ def analyze_market():
     else:
         signal = "🟡 صبر کن (معامله نکن)"
         reason = (
-            "RSI بین ۳۰ تا ۷۰ است. بازار در حالت خنثی و بدون تصمیم. "
+            "RSI بین ۳۰ تا ۷۰ است. بازار در حالت خنثی. "
             "کارتل هنوز حرکت اصلی‌اش را شروع نکرده. "
             "صبر کن تا بازار به یکی از دو ناحیه برسد."
         )
@@ -146,7 +139,7 @@ def analyze_market():
 
 
 # ═══════════════════════════════════════════════
-# ارسال پیام تلگرام (Plain Text)
+# تلگرام
 # ═══════════════════════════════════════════════
 def send_message(text, chat_id=None, keyboard=None):
     if not TOKEN:
@@ -156,15 +149,12 @@ def send_message(text, chat_id=None, keyboard=None):
     if not target:
         print("CHAT_ID تنظیم نشده")
         return
-
     url = "https://api.telegram.org/bot" + TOKEN + "/sendMessage"
     payload = {"chat_id": target, "text": text}
     if keyboard:
         payload["reply_markup"] = json.dumps(keyboard)
-
     data = urllib.parse.urlencode(payload).encode()
     req = urllib.request.Request(url, data=data)
-
     with send_lock:
         try:
             urllib.request.urlopen(req, timeout=TIMEOUT)
@@ -174,13 +164,9 @@ def send_message(text, chat_id=None, keyboard=None):
 
 def get_updates(offset=None):
     url = "https://api.telegram.org/bot" + TOKEN + "/getUpdates"
-    params = {
-        "timeout": 30,
-        "drop_pending_updates": True,  # جلوگیری از پیام‌های تکراری بعد از ری‌استارت
-    }
+    params = {"timeout": 30, "drop_pending_updates": True}
     if offset:
         params["offset"] = offset
-
     data = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(url, data=data)
     with urllib.request.urlopen(req, timeout=TIMEOUT + 10) as r:
@@ -188,7 +174,7 @@ def get_updates(offset=None):
 
 
 # ═══════════════════════════════════════════════
-# ساخت پیام تحلیل
+# ساخت پیام
 # ═══════════════════════════════════════════════
 def build_message(result, auto=False):
     head = "🔔 هشدار خودکار کارتل" if auto else "🕵️‍♂️ گزارش شکارچی کارتل"
@@ -204,19 +190,16 @@ def build_message(result, auto=False):
         "━━━━━━━━━━━━━━━━━━",
         f"سیگنال: {result['signal']}",
         "",
-        f"تحلیل:",
+        "تحلیل:",
         result["reason"],
         "━━━━━━━━━━━━━━━━━━",
         "⚠️ فقط بازار اسپات — بدون اهرم و فیوچرز",
     ]
     if auto:
-        lines.append("⏰ این تحلیل هر ۴ ساعت خودکار ارسال می‌شود")
+        lines.append("⏰ این تحلیل هر ۱ ساعت خودکار ارسال می‌شود")
     return "\n".join(lines)
 
 
-# ═══════════════════════════════════════════════
-# کیبورد
-# ═══════════════════════════════════════════════
 def main_keyboard():
     return {
         "keyboard": [[{"text": "🕵️‍♂️ بررسی بازار"}]],
@@ -226,7 +209,7 @@ def main_keyboard():
 
 
 # ═══════════════════════════════════════════════
-# اجرای تحلیل و ارسال
+# اجرای تحلیل
 # ═══════════════════════════════════════════════
 def run_analysis(chat_id, auto=False):
     try:
@@ -235,7 +218,7 @@ def run_analysis(chat_id, auto=False):
         result = analyze_market()
         msg = build_message(result, auto=auto)
         send_message(msg, chat_id=chat_id, keyboard=main_keyboard())
-        print(f"[{'AUTO' if auto else 'MANUAL'}] Signal: {result['action']} | RSI={result['rsi']:.2f}")
+        print(f"[{'AUTO' if auto else 'MANUAL'}] {result['action']} | RSI={result['rsi']:.2f}")
     except Exception as e:
         err = f"❌ خطا در تحلیل بازار:\n{str(e)}"
         send_message(err, chat_id=chat_id, keyboard=main_keyboard())
@@ -243,10 +226,10 @@ def run_analysis(chat_id, auto=False):
 
 
 # ═══════════════════════════════════════════════
-# تایمر خودکار (هر ۴ ساعت)
+# تایمر خودکار — هر ۱ ساعت
 # ═══════════════════════════════════════════════
 def auto_hunter():
-    print(f"⏰ Auto Hunter started (every {AUTO_INTERVAL // 3600} hours)")
+    print(f"⏰ Auto Hunter started (every {AUTO_INTERVAL // 60} minutes)")
     while True:
         time.sleep(AUTO_INTERVAL)
         if not CHAT:
@@ -256,16 +239,14 @@ def auto_hunter():
 
 
 # ═══════════════════════════════════════════════
-# حلقه اصلی ربات
+# main
 # ═══════════════════════════════════════════════
 def main():
     if not TOKEN:
         print("❌ BOT_TOKEN در متغیرهای محیطی تنظیم نشده!")
         sys.exit(1)
 
-    print("🚀 Spot Hunter Bot is running...")
-
-    # شروع تایمر خودکار
+    print("🚀 Spot Hunter Bot is running (1h timeframe)...")
     threading.Thread(target=auto_hunter, daemon=True).start()
 
     last_update_id = None
@@ -279,33 +260,28 @@ def main():
 
             for update in updates["result"]:
                 last_update_id = update["update_id"] + 1
-
                 if "message" not in update or "text" not in update["message"]:
                     continue
-
                 text = update["message"]["text"].strip()
                 chat_id = str(update["message"]["chat"]["id"])
 
-                # فقط چت مجاز
                 if CHAT and chat_id != CHAT:
                     continue
 
-                # ─── /start ───
                 if text in ["/start", "شروع", "استارت"]:
                     welcome = (
                         "🕵️‍♂️ به ربات شکارچی کارتل خوش آمدید\n\n"
-                        "این ربات فقط در تایم‌فریم ۴ ساعته کار می‌کند،\n"
+                        "این ربات فقط در تایم‌فریم ۱ ساعته کار می‌کند،\n"
                         "چون تایم‌فریم‌های پایین زمین بازی دستکاری‌شده‌ی کارتل هستند.\n\n"
                         "منطق کار:\n"
                         "• RSI زیر ۳۰ ← 🟢 خرید اسپات\n"
                         "• RSI بالای ۷۰ ← 🔴 فروش اسپات\n"
                         "• بین ۳۰ تا ۷۰ ← 🟡 صبر کن\n\n"
                         "برای شروع، دکمه زیر را بزن:\n"
-                        "⏰ هر ۴ ساعت هم خودکار تحلیل می‌فرستم."
+                        "⏰ هر ۱ ساعت هم خودکار تحلیل می‌فرستم."
                     )
                     send_message(welcome, chat_id=chat_id, keyboard=main_keyboard())
 
-                # ─── دکمه بررسی بازار ───
                 elif text in ["🕵️‍♂️ بررسی بازار", "بررسی بازار", "بررسی", "/analyze"]:
                     threading.Thread(
                         target=run_analysis,
@@ -313,15 +289,12 @@ def main():
                         daemon=True,
                     ).start()
 
-                # ─── /stop ───
                 elif text in ["/stop", "توقف", "قطع"]:
                     send_message(
-                        "🛑 برای قطع کامل ربات، در GitHub Actions آن را غیرفعال کن.\n"
-                        "تایمر خودکار همچنان کار می‌کند.",
+                        "🛑 برای قطع کامل ربات، در GitHub Actions آن را غیرفعال کن.",
                         chat_id=chat_id,
                     )
 
-                # ─── هر پیام دیگری ───
                 else:
                     send_message(
                         "برای بررسی بازار، دکمه زیر را بزن 👇",
@@ -334,6 +307,5 @@ def main():
             time.sleep(5)
 
 
-# ═══════════════════════════════════════════════
 if __name__ == "__main__":
     main()
