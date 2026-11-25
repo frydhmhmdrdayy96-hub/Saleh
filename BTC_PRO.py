@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 BTC SPOT HUNTER - Multi Timeframe Cartel Hunter
-تایم‌فریم‌ها: 30m ، 1h ، 4h
+تایم‌فریم‌ها: 5m ، 15m ، 30m ، 1h ، 4h
 فقط اسپات (Spot) - بدون اهرم
 """
 
@@ -28,13 +28,15 @@ RSI_PERIOD = 14
 
 # تایم‌فریم‌ها و برچسب فارسی‌شان
 TIMEFRAMES = {
+    "5m":  "۵ دقیقه",
+    "15m": "۱۵ دقیقه",
     "30m": "۳۰ دقیقه",
     "1h":  "۱ ساعته",
     "4h":  "۴ ساعته",
 }
 
-# فاصله تایمر خودکار: هر ۳۰ دقیقه (برای هر سه تایم‌فریم)
-AUTO_INTERVAL = 30 * 60   # ۱۸۰۰ ثانیه
+# فاصله تایمر خودکار: هر ۱۵ دقیقه (برای هر پنج تایم‌فریم)
+AUTO_INTERVAL = 15 * 60   # ۹۰۰ ثانیه
 
 send_lock = threading.Lock()
 
@@ -46,7 +48,7 @@ def api_get(path, params=None):
     url = BASE + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": "SpotHunter/2.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "SpotHunter/3.0"})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
         return json.loads(r.read().decode())
 
@@ -143,9 +145,6 @@ def analyze_tf(timeframe):
     }
 
 
-# ═══════════════════════════════════════════════
-# تحلیل هر سه تایم‌فریم
-# ═══════════════════════════════════════════════
 def analyze_all():
     results = {}
     errors = {}
@@ -215,7 +214,7 @@ def build_single_message(r, auto=False):
         "⚠️ فقط بازار اسپات — بدون اهرم",
     ]
     if auto:
-        lines.append("⏰ این تحلیل هر ۳۰ دقیقه خودکار ارسال می‌شود")
+        lines.append("⏰ این تحلیل هر ۱۵ دقیقه خودکار ارسال می‌شود")
     return "\n".join(lines)
 
 
@@ -254,10 +253,14 @@ def build_all_message(results, errors, auto=False):
     lines.append("جمع‌بندی:")
     lines.append(f"🟢 خرید: {buy_count} | 🔴 فروش: {sell_count} | 🟡 صبر: {wait_count}")
 
-    if buy_count >= 2:
-        lines.append("✅ حداقل دو تایم‌فریم سیگنال خرید می‌دهند — فرصت قوی")
+    if buy_count >= 3:
+        lines.append("✅ حداقل سه تایم‌فریم سیگنال خرید می‌دهند — فرصت قوی")
+    elif sell_count >= 3:
+        lines.append("✅ حداقل سه تایم‌فریم سیگنال فروش می‌دهند — فرصت قوی")
+    elif buy_count >= 2:
+        lines.append("⚠️ دو تایم‌فریم خرید می‌دهند — با احتیاط وارد شو")
     elif sell_count >= 2:
-        lines.append("✅ حداقل دو تایم‌فریم سیگنال فروش می‌دهند — فرصت قوی")
+        lines.append("⚠️ دو تایم‌فریم فروش می‌دهند — با احتیاط خارج شو")
     elif buy_count == 1:
         lines.append("⚠️ فقط یک تایم‌فریم خرید می‌دهد — با احتیاط وارد شو")
     elif sell_count == 1:
@@ -268,7 +271,7 @@ def build_all_message(results, errors, auto=False):
     lines.append("━━━━━━━━━━━━━━━━━━")
     lines.append("⚠️ فقط بازار اسپات — بدون اهرم")
     if auto:
-        lines.append("⏰ این تحلیل هر ۳۰ دقیقه خودکار ارسال می‌شود")
+        lines.append("⏰ این تحلیل هر ۱۵ دقیقه خودکار ارسال می‌شود")
     return "\n".join(lines)
 
 
@@ -279,7 +282,8 @@ def main_keyboard():
     return {
         "keyboard": [
             [{"text": "🕵️‍♂️ تحلیل همه تایم‌فریم‌ها"}],
-            [{"text": "📊 ۳۰ دقیقه"}, {"text": "📊 ۱ ساعته"}, {"text": "📊 ۴ ساعته"}],
+            [{"text": "📊 ۵ دقیقه"}, {"text": "📊 ۱۵ دقیقه"}, {"text": "📊 ۳۰ دقیقه"}],
+            [{"text": "📊 ۱ ساعته"}, {"text": "📊 ۴ ساعته"}],
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False,
@@ -323,7 +327,7 @@ def run_all(chat_id, auto=False):
 
 
 # ═══════════════════════════════════════════════
-# تایمر خودکار — هر ۳۰ دقیقه
+# تایمر خودکار — هر ۱۵ دقیقه
 # ═══════════════════════════════════════════════
 def auto_hunter():
     print(f"⏰ Auto Hunter started (every {AUTO_INTERVAL // 60} minutes)")
@@ -331,7 +335,7 @@ def auto_hunter():
         time.sleep(AUTO_INTERVAL)
         if not CHAT:
             continue
-        print("⏰ Running auto analysis (all timeframes)...")
+        print("⏰ Running auto analysis (all 5 timeframes)...")
         run_all(CHAT, auto=True)
 
 
@@ -343,7 +347,7 @@ def main():
         print("❌ BOT_TOKEN در متغیرهای محیطی تنظیم نشده!")
         sys.exit(1)
 
-    print("🚀 Spot Hunter Bot is running (30m / 1h / 4h)...")
+    print("🚀 Spot Hunter Bot is running (5m/15m/30m/1h/4h)...")
     threading.Thread(target=auto_hunter, daemon=True).start()
 
     last_update_id = None
@@ -368,8 +372,10 @@ def main():
                 if text in ["/start", "شروع", "استارت"]:
                     welcome = (
                         "🕵️‍♂️ به ربات شکارچی کارتل خوش آمدید\n\n"
-                        "این ربات در سه تایم‌فریم تحلیل می‌کند:\n"
-                        "• ۳۰ دقیقه (نیم‌ساعته)\n"
+                        "این ربات در پنج تایم‌فریم تحلیل می‌کند:\n"
+                        "• ۵ دقیقه\n"
+                        "• ۱۵ دقیقه\n"
+                        "• ۳۰ دقیقه\n"
                         "• ۱ ساعته\n"
                         "• ۴ ساعته\n\n"
                         "منطق کار:\n"
@@ -377,12 +383,18 @@ def main():
                         "• RSI بالای ۷۰ ← 🔴 فروش اسپات\n"
                         "• بین ۳۰ تا ۷۰ ← 🟡 صبر کن\n\n"
                         "می‌توانی هر تایم‌فریم را جدا ببینی یا همه را با هم.\n"
-                        "⏰ هر ۳۰ دقیقه هم خودکار همه تایم‌فریم‌ها را تحلیل می‌کنم."
+                        "⏰ هر ۱۵ دقیقه هم خودکار همه تایم‌فریم‌ها را تحلیل می‌کنم."
                     )
                     send_message(welcome, chat_id=chat_id, keyboard=main_keyboard())
 
                 elif text in ["🕵️‍♂️ تحلیل همه تایم‌فریم‌ها", "همه تایم‌فریم‌ها", "همه"]:
                     threading.Thread(target=run_all, args=(chat_id,), daemon=True).start()
+
+                elif text == "📊 ۵ دقیقه":
+                    threading.Thread(target=run_single, args=(chat_id, "5m"), daemon=True).start()
+
+                elif text == "📊 ۱۵ دقیقه":
+                    threading.Thread(target=run_single, args=(chat_id, "15m"), daemon=True).start()
 
                 elif text == "📊 ۳۰ دقیقه":
                     threading.Thread(target=run_single, args=(chat_id, "30m"), daemon=True).start()
